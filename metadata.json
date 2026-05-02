@@ -1,0 +1,9 @@
+{
+  "name": "洛克王国异色助手",
+  "description": "专业记录洛克王国宠物异色捕捉进度、咕噜球消耗及污染值保底统计。支持自定义宠物及实时更新剩余球数。",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "数据持久化",
+    "实时进度追踪"
+  ]
+}
