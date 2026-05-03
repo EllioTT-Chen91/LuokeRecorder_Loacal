@@ -90,18 +90,81 @@ export default function App() {
     localStorage.setItem("roco-hunts", JSON.stringify(hunts));
   }, [hunts]);
 
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncStatus, setSyncStatus] = useState<"synced" | "pending" | "error">(
+    "synced",
+  );
+
   const fetchHunts = async () => {
     if (!token) return;
+    setIsSyncing(true);
     try {
       const res = await fetch(`${API_BASE_URL}/api/hunts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
-        const data = await res.json();
-        setHunts(data);
+        const remoteData: HuntRecord[] = await res.json();
+
+        setHunts((prevHunts) => {
+          // 使用 Map 以 ID 为键进行合并，确保唯一
+          const huntMap = new Map<string, HuntRecord>();
+
+          // 先放云端数据
+          remoteData.forEach((h) => huntMap.set(h.id, h));
+
+          // 再放本地数据（如果本地更新时间更晚，则覆盖并同步）
+          prevHunts.forEach((local) => {
+            const remote = huntMap.get(local.id);
+            if (!remote) {
+              huntMap.set(local.id, local);
+              syncSingleHunt(local, "create");
+            } else if ((local.updatedAt || 0) > (remote.updatedAt || 0)) {
+              huntMap.set(local.id, local);
+              syncSingleHunt(local, "update");
+            }
+          });
+
+          return Array.from(huntMap.values()).sort(
+            (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0),
+          );
+        });
+        setSyncStatus("synced");
+      } else {
+        setSyncStatus("error");
       }
     } catch (err) {
       console.error("Failed to fetch hunts", err);
+      setSyncStatus("error");
+    } finally {
+      setIsSyncing(false);
+    }
+  };
+
+  const syncSingleHunt = async (
+    hunt: HuntRecord,
+    mode: "create" | "update" = "update",
+  ) => {
+    if (!token) return;
+    setSyncStatus("pending");
+    try {
+      const url =
+        mode === "create"
+          ? `${API_BASE_URL}/api/hunts`
+          : `${API_BASE_URL}/api/hunts/${hunt.id}`;
+      const method = mode === "create" ? "POST" : "PUT";
+
+      const res = await fetch(url, {
+        method,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify(hunt),
+      });
+      if (res.ok) setSyncStatus("synced");
+      else setSyncStatus("error");
+    } catch (err) {
+      setSyncStatus("error");
     }
   };
 
@@ -163,18 +226,7 @@ export default function App() {
     setIsAdding(false);
 
     if (token) {
-      try {
-        await fetch(`${API_BASE_URL}/api/hunts`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Authorization: `Bearer ${token}`,
-          },
-          body: JSON.stringify(newHunt),
-        });
-      } catch (err) {
-        console.error("Failed to sync new hunt", err);
-      }
+      syncSingleHunt(newHunt, "create");
     }
   };
 
@@ -199,16 +251,7 @@ export default function App() {
       if (h.id === id) {
         const updated = { ...h, ...updates, updatedAt: Date.now() };
         if (token) {
-          fetch(`${API_BASE_URL}/api/hunts/${id}`, {
-            method: "PUT",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${token}`,
-            },
-            body: JSON.stringify(updated),
-          }).catch((err) =>
-            console.error("Failed to update hunt on server", err),
-          );
+          syncSingleHunt(updated, "update");
         }
         return updated;
       }
@@ -239,14 +282,31 @@ export default function App() {
         const content = e.target?.result as string;
         const imported = JSON.parse(content);
         if (Array.isArray(imported)) {
-          const merged = [
-            ...imported,
-            ...hunts.filter((h) => !imported.find((i: any) => i.id === h.id)),
-          ];
-          setHunts(merged);
-          alert("数据导入成功！");
-          // If logged in, sync each new one? This might be slow for many records.
-          // Ideally a batch api but for now just local update then sync on next load or individually.
+          setHunts((prev) => {
+            const huntMap = new Map<string, HuntRecord>();
+            // 先加载现有数据
+            prev.forEach((h) => huntMap.set(h.id, h));
+
+            // 逐个处理导入的数据
+            imported.forEach((newHunt: HuntRecord) => {
+              const existing = huntMap.get(newHunt.id);
+              // 如果不存在，或者导入的更新时间更晚，则采用
+              if (
+                !existing ||
+                (newHunt.updatedAt || 0) > (existing.updatedAt || 0)
+              ) {
+                huntMap.set(newHunt.id, newHunt);
+                // 自动同步到云端
+                if (token) {
+                  syncSingleHunt(newHunt, existing ? "update" : "create");
+                }
+              }
+            });
+            return Array.from(huntMap.values()).sort(
+              (a, b) => (b.updatedAt || 0) - (a.updatedAt || 0),
+            );
+          });
+          alert("数据导入并同步成功！");
         }
       } catch (err) {
         alert("导入失败，请检查文件格式。");
@@ -297,6 +357,28 @@ export default function App() {
             <div className="flex items-center gap-4">
               <div className="flex flex-col items-end gap-2">
                 <div className="flex items-center gap-2">
+                  {user && (
+                    <button
+                      onClick={fetchHunts}
+                      disabled={isSyncing}
+                      className={`flex h-10 px-3 items-center gap-2 rounded-xl border text-[9px] font-black uppercase tracking-widest transition-all ${
+                        syncStatus === "synced"
+                          ? "bg-emerald-500/10 text-emerald-500 border-emerald-500/20"
+                          : syncStatus === "error"
+                            ? "bg-red-500/10 text-red-500 border-red-500/20"
+                            : "bg-blue-500/10 text-blue-500 border-blue-500/20"
+                      }`}
+                    >
+                      <div
+                        className={`w-1.5 h-1.5 rounded-full ${isSyncing ? "animate-pulse bg-blue-500" : syncStatus === "synced" ? "bg-emerald-500" : "bg-red-500"}`}
+                      />
+                      {isSyncing
+                        ? "同步中..."
+                        : syncStatus === "synced"
+                          ? "云端已同步"
+                          : "同步失败"}
+                    </button>
+                  )}
                   <button
                     onClick={exportData}
                     className="flex h-10 px-4 items-center gap-2 rounded-xl bg-white/5 border border-white/10 text-[10px] font-black uppercase tracking-widest hover:bg-white/10 transition-all"
