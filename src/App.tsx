@@ -43,6 +43,8 @@ import {
 } from "recharts";
 import { HuntRecord, POLLUTION_LIMIT, PollutionSession } from "./types.ts";
 
+const API_BASE_URL = import.meta.env.VITE_API_URL || "";
+
 export default function App() {
   const [user, setUser] = useState<{ username: string } | null>(() => {
     const saved = localStorage.getItem("roco-user");
@@ -91,7 +93,7 @@ export default function App() {
   const fetchHunts = async () => {
     if (!token) return;
     try {
-      const res = await fetch("/api/hunts", {
+      const res = await fetch(`${API_BASE_URL}/api/hunts`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       if (res.ok) {
@@ -108,7 +110,9 @@ export default function App() {
     setAuthError("");
     try {
       const endpoint =
-        authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+        authMode === "login"
+          ? `${API_BASE_URL}/api/login`
+          : `${API_BASE_URL}/api/register`;
       const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -160,7 +164,7 @@ export default function App() {
 
     if (token) {
       try {
-        await fetch("/api/hunts", {
+        await fetch(`${API_BASE_URL}/api/hunts`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -180,7 +184,7 @@ export default function App() {
 
     if (token) {
       try {
-        await fetch(`/api/hunts/${id}`, {
+        await fetch(`${API_BASE_URL}/api/hunts/${id}`, {
           method: "DELETE",
           headers: { Authorization: `Bearer ${token}` },
         });
@@ -195,7 +199,7 @@ export default function App() {
       if (h.id === id) {
         const updated = { ...h, ...updates, updatedAt: Date.now() };
         if (token) {
-          fetch(`/api/hunts/${id}`, {
+          fetch(`${API_BASE_URL}/api/hunts/${id}`, {
             method: "PUT",
             headers: {
               "Content-Type": "application/json",
