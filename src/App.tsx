@@ -1,4 +1,11 @@
-import { useState, useEffect, useMemo } from "react";
+import {
+  useState,
+  useEffect,
+  useMemo,
+  useRef,
+  FormEvent,
+  ChangeEvent,
+} from "react";
 import {
   Plus,
   Trash2,
@@ -18,6 +25,11 @@ import {
   BarChart3,
   ChevronDown,
   ChevronUp,
+  Download,
+  Upload,
+  User,
+  LogOut,
+  Lock,
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import {
@@ -32,11 +44,18 @@ import {
 import { HuntRecord, POLLUTION_LIMIT, PollutionSession } from "./types.ts";
 
 export default function App() {
+  const [user, setUser] = useState<{ username: string } | null>(() => {
+    const saved = localStorage.getItem("roco-user");
+    return saved ? JSON.parse(saved) : null;
+  });
+  const [token, setToken] = useState<string | null>(
+    localStorage.getItem("roco-token"),
+  );
+
   const [hunts, setHunts] = useState<HuntRecord[]>(() => {
     try {
       const saved = localStorage.getItem("roco-hunts");
       const parsed = saved ? JSON.parse(saved) : [];
-      // Data migration for older records
       return parsed.map((h: any) => ({
         ...h,
         history: h.history || [],
@@ -47,16 +66,79 @@ export default function App() {
     }
   });
 
+  const [isAuthOpen, setIsAuthOpen] = useState(false);
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authForm, setAuthForm] = useState({ username: "", password: "" });
+  const [authError, setAuthError] = useState("");
+
   const [isAdding, setIsAdding] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [newPetName, setNewPetName] = useState("");
   const [newTotalBalls, setNewTotalBalls] = useState(100);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // --- Auth & Data Sync ---
+  useEffect(() => {
+    if (token) {
+      fetchHunts();
+    }
+  }, [token]);
 
   useEffect(() => {
     localStorage.setItem("roco-hunts", JSON.stringify(hunts));
   }, [hunts]);
 
-  const addHunt = () => {
+  const fetchHunts = async () => {
+    if (!token) return;
+    try {
+      const res = await fetch("/api/hunts", {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setHunts(data);
+      }
+    } catch (err) {
+      console.error("Failed to fetch hunts", err);
+    }
+  };
+
+  const handleAuth = async (e: FormEvent) => {
+    e.preventDefault();
+    setAuthError("");
+    try {
+      const endpoint =
+        authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+      const res = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(authForm),
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setUser(data.user);
+        setToken(data.token);
+        localStorage.setItem("roco-user", JSON.stringify(data.user));
+        localStorage.setItem("roco-token", data.token);
+        setIsAuthOpen(false);
+        setAuthForm({ username: "", password: "" });
+      } else {
+        setAuthError(data.error);
+      }
+    } catch (err) {
+      setAuthError("Authentication failed");
+    }
+  };
+
+  const logout = () => {
+    setUser(null);
+    setToken(null);
+    localStorage.removeItem("roco-user");
+    localStorage.removeItem("roco-token");
+    setHunts([]); // Clear on logout or keep local? User probably wants to clear.
+  };
+
+  const addHunt = async () => {
     if (!newPetName.trim()) return;
 
     const newHunt: HuntRecord = {
@@ -71,22 +153,102 @@ export default function App() {
       updatedAt: Date.now(),
     };
 
-    setHunts([newHunt, ...hunts]);
+    const updatedHunts = [newHunt, ...hunts];
+    setHunts(updatedHunts);
     setNewPetName("");
     setIsAdding(false);
+
+    if (token) {
+      try {
+        await fetch("/api/hunts", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(newHunt),
+        });
+      } catch (err) {
+        console.error("Failed to sync new hunt", err);
+      }
+    }
   };
 
-  const deleteHunt = (id: string) => {
+  const deleteHunt = async (id: string) => {
     setHunts(hunts.filter((h) => h.id !== id));
     setDeletingId(null);
+
+    if (token) {
+      try {
+        await fetch(`/api/hunts/${id}`, {
+          method: "DELETE",
+          headers: { Authorization: `Bearer ${token}` },
+        });
+      } catch (err) {
+        console.error("Failed to delete hunt on server", err);
+      }
+    }
   };
 
-  const updateHunt = (id: string, updates: Partial<HuntRecord>) => {
-    setHunts(
-      hunts.map((h) =>
-        h.id === id ? { ...h, ...updates, updatedAt: Date.now() } : h,
-      ),
-    );
+  const updateHunt = async (id: string, updates: Partial<HuntRecord>) => {
+    const updatedHunts = hunts.map((h) => {
+      if (h.id === id) {
+        const updated = { ...h, ...updates, updatedAt: Date.now() };
+        if (token) {
+          fetch(`/api/hunts/${id}`, {
+            method: "PUT",
+            headers: {
+              "Content-Type": "application/json",
+              Authorization: `Bearer ${token}`,
+            },
+            body: JSON.stringify(updated),
+          }).catch((err) =>
+            console.error("Failed to update hunt on server", err),
+          );
+        }
+        return updated;
+      }
+      return h;
+    });
+    setHunts(updatedHunts);
+  };
+
+  // --- Export / Import ---
+  const exportData = () => {
+    const dataStr = JSON.stringify(hunts, null, 2);
+    const dataUri =
+      "data:application/json;charset=utf-8," + encodeURIComponent(dataStr);
+    const exportFileDefaultName = `locke_records_${new Date().toISOString().split("T")[0]}.json`;
+    const linkElement = document.createElement("a");
+    linkElement.setAttribute("href", dataUri);
+    linkElement.setAttribute("download", exportFileDefaultName);
+    linkElement.click();
+  };
+
+  const importData = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const content = e.target?.result as string;
+        const imported = JSON.parse(content);
+        if (Array.isArray(imported)) {
+          const merged = [
+            ...imported,
+            ...hunts.filter((h) => !imported.find((i: any) => i.id === h.id)),
+          ];
+          setHunts(merged);
+          alert("数据导入成功！");
+          // If logged in, sync each new one? This might be slow for many records.
+          // Ideally a batch api but for now just local update then sync on next load or individually.
+        }
+      } catch (err) {
+        alert("导入失败，请检查文件格式。");
+      }
+    };
+    reader.readAsText(file);
   };
 
   const totalBallsUsed = useMemo(() => {
@@ -120,20 +282,61 @@ export default function App() {
             <div className="space-y-1">
               <h1 className="flex items-center gap-4 text-3xl font-black tracking-tight">
                 <div className="h-10 w-2.5 rounded-full bg-blue-500"></div>
-                POKÉMON MASTER
+                LOCKE RECORD
               </h1>
               <p className="pl-6 text-xs font-black uppercase tracking-[0.4em] text-slate-500">
-                捕捉轨迹分析终端 · V2.1 Professional
+                {user
+                  ? `欢迎回来, ${user.username}`
+                  : "捕捉轨迹分析终端 · V2.1 Professional"}
               </p>
             </div>
-            <motion.button
-              whileHover={{ scale: 1.05 }}
-              whileTap={{ scale: 0.95 }}
-              onClick={() => setIsAdding(true)}
-              className="flex h-16 w-16 items-center justify-center rounded-[2rem] bg-blue-600 font-bold text-white shadow-2xl shadow-blue-500/30 active:scale-95 transition-all"
-            >
-              <Plus size={32} />
-            </motion.button>
+            <div className="flex items-center gap-4">
+              <div className="flex flex-col items-end gap-2">
+                <div className="flex items-center gap-2">
+                  <button
+                    onClick={exportData}
+                    className="flex h-10 px-4 items-center gap-2 rounded-xl bg-white/5 border border-white/10 text-[10px] font-black uppercase tracking-widest hover:bg-white/10 transition-all"
+                  >
+                    <Download size={14} /> 导出备份
+                  </button>
+                  <button
+                    onClick={() => fileInputRef.current?.click()}
+                    className="flex h-10 px-4 items-center gap-2 rounded-xl bg-white/5 border border-white/10 text-[10px] font-black uppercase tracking-widest hover:bg-white/10 transition-all"
+                  >
+                    <Upload size={14} /> 导入数据
+                  </button>
+                  <input
+                    type="file"
+                    ref={fileInputRef}
+                    onChange={importData}
+                    accept=".json"
+                    className="hidden"
+                  />
+                </div>
+                <button
+                  onClick={() => (user ? logout() : setIsAuthOpen(true))}
+                  className={`flex h-10 px-4 items-center gap-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all ${user ? "bg-red-500/10 text-red-400 border border-red-500/20" : "bg-blue-600 text-white shadow-lg shadow-blue-500/30"}`}
+                >
+                  {user ? (
+                    <>
+                      <LogOut size={14} /> 退出登录
+                    </>
+                  ) : (
+                    <>
+                      <User size={14} /> 登录同步
+                    </>
+                  )}
+                </button>
+              </div>
+              <motion.button
+                whileHover={{ scale: 1.05 }}
+                whileTap={{ scale: 0.95 }}
+                onClick={() => setIsAdding(true)}
+                className="flex h-16 w-16 items-center justify-center rounded-[2rem] bg-blue-600 font-bold text-white shadow-2xl shadow-blue-500/30 active:scale-95 transition-all"
+              >
+                <Plus size={32} />
+              </motion.button>
+            </div>
           </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -346,6 +549,96 @@ export default function App() {
                   className="flex-1 py-5 bg-blue-600 text-white rounded-3xl font-black text-sm shadow-lg shadow-blue-200 hover:bg-blue-700 transition-colors uppercase tracking-widest"
                 >
                   建立表格
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Auth Modal */}
+      <AnimatePresence>
+        {isAuthOpen && (
+          <div className="fixed inset-0 z-[60] flex items-center justify-center p-4">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setIsAuthOpen(false)}
+              className="absolute inset-0 bg-slate-950/20 backdrop-blur-md"
+            />
+            <motion.div
+              initial={{ scale: 0.9, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 20 }}
+              className="bg-white w-full max-w-sm rounded-[3rem] p-8 shadow-2xl relative z-10"
+            >
+              <div className="w-16 h-16 bg-blue-600 text-white rounded-3xl flex items-center justify-center mb-6 shadow-xl shadow-blue-100">
+                <Lock size={32} />
+              </div>
+
+              <h3 className="text-2xl font-black mb-2 tracking-tighter">
+                {authMode === "login" ? "欢迎回来" : "开启云同步"}
+              </h3>
+              <p className="text-slate-400 text-[10px] font-black uppercase tracking-widest mb-8">
+                {authMode === "login"
+                  ? "请输入您的凭据以同步数据"
+                  : "创建一个账号来持久化您的猎取记录"}
+              </p>
+
+              <form onSubmit={handleAuth} className="space-y-6">
+                {authError && (
+                  <div className="bg-red-50 text-red-500 p-3 rounded-2xl text-[10px] font-bold text-center uppercase tracking-widest border border-red-100">
+                    {authError}
+                  </div>
+                )}
+                <div>
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 ml-4">
+                    用户名
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    value={authForm.username}
+                    onChange={(e) =>
+                      setAuthForm({ ...authForm, username: e.target.value })
+                    }
+                    className="w-full bg-slate-50 border-2 border-slate-100 rounded-3xl px-6 py-4 focus:ring-0 focus:border-blue-600 outline-none transition-all text-sm font-bold"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[10px] font-black text-slate-400 uppercase tracking-widest mb-2 ml-4">
+                    密码
+                  </label>
+                  <input
+                    type="password"
+                    required
+                    value={authForm.password}
+                    onChange={(e) =>
+                      setAuthForm({ ...authForm, password: e.target.value })
+                    }
+                    className="w-full bg-slate-50 border-2 border-slate-100 rounded-3xl px-6 py-4 focus:ring-0 focus:border-blue-600 outline-none transition-all text-sm font-bold"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  className="w-full py-5 bg-blue-600 text-white rounded-3xl font-black text-sm shadow-lg shadow-blue-200 hover:bg-blue-700 transition-colors uppercase tracking-widest"
+                >
+                  {authMode === "login" ? "立即登录" : "立即注册"}
+                </button>
+              </form>
+
+              <div className="mt-6 text-center">
+                <button
+                  onClick={() =>
+                    setAuthMode(authMode === "login" ? "register" : "login")
+                  }
+                  className="text-[10px] font-black text-slate-400 uppercase tracking-widest hover:text-blue-600 transition-colors"
+                >
+                  {authMode === "login"
+                    ? "没有账号？去注册"
+                    : "已有账号？去登录"}
                 </button>
               </div>
             </motion.div>
